@@ -11,27 +11,46 @@ import spinal.lib.generator._
 import spinal.lib.io.{Gpio, InOutWrapper}
 import spinal.lib.misc.plic.PlicMapping
 import vexriscv.VexRiscvBmbGenerator
+import vexriscv.ip._
+import vexriscv._
+import vexriscv.plugin._
+
 
 // Define a SoC abstract enough to be used for simulation
 class ICESugarProMinimalAbstract extends Area{
   implicit val interconnect = BmbInterconnectGenerator()
-  implicit val bmbPeripheral = BmbBridgeGenerator(mapping = SizeMapping(0x10000000, 16 MiB)).peripheral(dataWidth = 32)
+  implicit val bmbPeripheral = BmbBridgeGenerator(mapping = SizeMapping(0xF0000000l, 16 MiB)).peripheral(dataWidth = 32)
   implicit val peripheralDecoder = bmbPeripheral.asPeripheralDecoder() //Will be used by peripherals as default bus to connect to
   implicit val cpu = VexRiscvBmbGenerator()
 
-  interconnect.setDefaultArbitration(BmbInterconnectGenerator.STATIC_PRIORITY)
-  interconnect.setPriority(cpu.iBus, 1)
-  interconnect.setPriority(cpu.dBus, 2)
+  // Define the main interrupt controllers
+  val plic = BmbPlicGenerator(0xC00000)
+  plic.priorityWidth.load(2)
+  plic.mapping.load(PlicMapping.sifive)
 
   val clint = BmbClintGenerator(0xB00000) //Used as a time reference only
-  clint.cpuCount.load(0)
+  clint.cpuCount.load(1)
+
+  cpu.setTimerInterrupt(clint.timerInterrupt(0))
+  cpu.setSoftwareInterrupt(clint.softwareInterrupt(0))
+  plic.addTarget(cpu.externalInterrupt)
+  //plic.addTarget(cpu.externalSupervisorInterrupt)
+  List(clint.logic, cpu.logic).produce{
+    for (plugin <- cpu.config.plugins) plugin match {
+      case plugin : CsrPlugin if plugin.utime != null => plugin.utime := RegNext(clint.logic.io.time)
+      case _ =>
+    }
+  }
 
   //Add components
-  val ramA = BmbOnChipRamGenerator(0x80000000l)
+  val ramA = BmbOnChipRamGenerator(0x80000000l) // 64K Code
   val gpioA = BmbGpioGenerator(0x00000)
   val uartA = BmbUartGenerator(0x10000)
 
   //Interconnect specification
+  interconnect.setDefaultArbitration(BmbInterconnectGenerator.STATIC_PRIORITY)
+  interconnect.setPriority(cpu.iBus, 1)
+  interconnect.setPriority(cpu.dBus, 2)
   interconnect.addConnection(
     cpu.iBus -> List(ramA.ctrl),
     cpu.dBus -> List(ramA.ctrl, bmbPeripheral.bmb)
@@ -68,15 +87,121 @@ object ICESugarProMinimalAbstract{
   def default(g : ICESugarProMinimalAbstract) = g.rework {
     import g._
 
-    cpu.config.load(VexRiscvConfigs.minimal)
+    def cpuconfig = VexRiscvConfig(
+      withMemoryStage = true,
+      withWriteBackStage = true,
+      List(
+        new IBusCachedPlugin(
+          resetVector = 0x80000000l,
+          prediction = STATIC,
+          compressedGen = true, // for compressed instruction
+          injectorStage = true, // for speed up
+          config = InstructionCacheConfig(
+            cacheSize = 4096,
+            bytePerLine =32,
+            wayCount = 1,
+            addressWidth = 32,
+            cpuDataWidth = 32,
+            memDataWidth = 32,
+            catchIllegalAccess = true,
+            catchAccessFault = true,
+            asyncTagMemory = true, //false,
+            // https://github.com/SpinalHDL/VexRiscv/issues/93
+            twoCycleRam = false, //true, ->set false if compressedGen = true
+            twoCycleCache = false //true ->set false if compressedGen = true
+          )
+          //            askMemoryTranslation = true,
+          //            memoryTranslatorPortConfig = MemoryTranslatorPortConfig(
+          //              portTlbSize = 4
+          //            )
+        ),
+        new DBusCachedPlugin(
+          config = new DataCacheConfig(
+            cacheSize         = 4096,
+            bytePerLine       = 32,
+            wayCount          = 1,
+            addressWidth      = 32,
+            cpuDataWidth      = 32,
+            memDataWidth      = 32,
+            catchAccessError  = true,
+            catchIllegal      = true,
+            catchUnaligned    = true,
+            asyncTagMemory = true //false
+          ),
+          memoryTranslatorPortConfig = null
+          //            memoryTranslatorPortConfig = MemoryTranslatorPortConfig(
+          //              portTlbSize = 6
+          //            )
+        ),
+        new StaticMemoryTranslatorPlugin(
+          ioRange      = _(31 downto 28) === 0xF
+        ),
+        new DecoderSimplePlugin(
+          catchIllegalInstruction = true
+        ),
+        new RegFilePlugin(
+          regFileReadyKind = plugin.ASYNC,//plugin.SYNC, // Use BRAM or NOT
+          zeroBoot = false
+        ),
+        new IntAluPlugin,
+        new SrcPlugin(
+          separatedAddSub = false,
+          executeInsertion = true
+        ),
+        new FullBarrelShifterPlugin,
+        new MulPlugin,
+        new DivPlugin,
+        new HazardSimplePlugin(
+          bypassExecute           = true,
+          bypassMemory            = true,
+          bypassWriteBack         = true,
+          bypassWriteBackBuffer   = true,
+          pessimisticUseSrc       = false,
+          pessimisticWriteRegFile = false,
+          pessimisticAddressMatch = false
+        ),
+        new BranchPlugin(
+          earlyBranch = false,
+          catchAddressMisaligned = true
+        ),
+        new CsrPlugin(
+          new CsrPluginConfig(
+            catchIllegalAccess = false,
+            mvendorid      = null,
+            marchid        = null,
+            mimpid         = null,
+            mhartid        = null,
+            misaExtensionsInit = 66,
+            misaAccess     = CsrAccess.NONE,
+            mtvecAccess    = CsrAccess.NONE,
+            mtvecInit      = 0x80000020l,
+            mepcAccess     = CsrAccess.READ_WRITE,
+            mscratchGen    = false,
+            mcauseAccess   = CsrAccess.READ_ONLY,
+            mbadaddrAccess = CsrAccess.READ_ONLY,
+            mcycleAccess   = CsrAccess.NONE,
+            minstretAccess = CsrAccess.NONE,
+            ecallGen       = true, //false,
+            ebreakGen      = false,
+            wfiGenAsWait   = false,
+            ucycleAccess   = CsrAccess.NONE,
+            uinstretAccess = CsrAccess.NONE
+          )
+        ),
+        new YamlPlugin("cpu0.yaml")
+      )
+    )
 
-    ramA.size.load(32 KiB)
+    cpu.config.load(cpuconfig)
+    //cpu.config.load(VexRiscvConfigs.muraxLike)
+
+    ramA.size.load(64 KiB)
     ramA.hexInit.load("software/standalone/blinkAndEcho/build/blinkAndEcho.hex")
 
     uartA.parameter load UartCtrlMemoryMappedConfig(
       baudrate = 115200,
-      txFifoDepth = 1,
-      rxFifoDepth = 1
+      txFifoDepth = 16,
+      rxFifoDepth = 16
     )
 
     gpioA.parameter load Gpio.Parameter(width = 8)
@@ -132,11 +257,3 @@ object ICESugarProMinimalSim extends App{
   }
 }
 
-//  val plic = BmbPlicGenerator(0xC00000)
-//  plic.priorityWidth.load(2)
-//  plic.mapping.load(PlicMapping.sifive)
-//  plic.addTarget(cpu.externalInterrupt)
-//
-//  val clint = BmbClintGenerator(0xB00000)
-//  clint.cpuCount.load(1)
-//  cpu.setTimerInterrupt(clint.timerInterrupt(0))
