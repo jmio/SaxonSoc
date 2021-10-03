@@ -14,6 +14,7 @@ import vexriscv.VexRiscvBmbGenerator
 import vexriscv.ip._
 import vexriscv._
 import vexriscv.plugin._
+import spinal.core.fiber._
 
 
 // Define a SoC abstract enough to be used for simulation
@@ -205,6 +206,14 @@ object ICESugarProMinimalAbstract{
     )
 
     gpioA.parameter load Gpio.Parameter(width = 8)
+
+    val io = new Bundle {
+      val externalInterruptLine = in Bool()
+    }
+    val exline = Handle[Bool]
+
+    exline.load(io.externalInterruptLine)
+    plic.addInterrupt(exline,1)
 
     g
   }
