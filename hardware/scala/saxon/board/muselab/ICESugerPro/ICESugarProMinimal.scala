@@ -4,16 +4,20 @@ import saxon._
 import spinal.core._
 import spinal.lib.com.uart.UartCtrlMemoryMappedConfig
 import spinal.lib.bus.bmb._
+import spinal.lib.bus.bsb.BsbInterconnectGenerator
 import spinal.lib.bus.misc.SizeMapping
 import spinal.lib.com.jtag.sim.JtagTcp
 import spinal.lib.com.uart.sim.{UartDecoder, UartEncoder}
 import spinal.lib.generator._
 import spinal.lib.io.{Gpio, InOutWrapper}
 import spinal.lib.misc.plic.PlicMapping
+import spinal.lib.graphic.RgbConfig
+import spinal.lib.graphic.vga.{BmbVgaCtrlGenerator, BmbVgaCtrlParameter}
 import spinal.lib.memory.sdram.sdr._
 import spinal.lib.memory.sdram.xdr.CoreParameter
 import spinal.lib.memory.sdram.xdr.phy.{Ecp5Sdrx2Phy, XilinxS7Phy}
 import spinal.lib.blackbox.lattice.ecp5.{DCCA, IDDRX1F, ODDRX1F}
+import spinal.lib.system.dma.sg.{DmaMemoryLayout, DmaSgGenerator}
 import vexriscv.VexRiscvBmbGenerator
 import vexriscv.ip._
 import vexriscv._
@@ -39,7 +43,7 @@ class ICESugarProMinimalAbstract extends Area{
   cpu.setTimerInterrupt(clint.timerInterrupt(0))
   cpu.setSoftwareInterrupt(clint.softwareInterrupt(0))
   plic.addTarget(cpu.externalInterrupt)
-  //plic.addTarget(cpu.externalSupervisorInterrupt)
+  plic.addTarget(cpu.externalSupervisorInterrupt)
   List(clint.logic, cpu.logic).produce{
     for (plugin <- cpu.config.plugins) plugin match {
       case plugin : CsrPlugin if plugin.utime != null => plugin.utime := RegNext(clint.logic.io.time)
@@ -55,13 +59,40 @@ class ICESugarProMinimalAbstract extends Area{
   val gpioA = BmbGpioGenerator(0x00000)
   val uartA = BmbUartGenerator(0x10000)
 
+  implicit val bsbInterconnect = BsbInterconnectGenerator()
+  val dma = new DmaSgGenerator(0x80000){
+    val vga = new Area{
+      val channel = createChannel()
+      channel.fixedBurst(64)
+      channel.withCircularMode()
+      channel.fifoMapping load Some(0, 256)
+      channel.connectInterrupt(plic, 12)
+
+      val stream = createOutput(byteCount = 4)
+      channel.outputsPorts += stream
+    }
+  }
+
+  val dBus32 = BmbBridgeGenerator()
+  dBus32.dataWidth(32) //Avoid 64 bits FPU requirements getting further
+
+  //interconnect.addConnection(dma.write,   dBus32.bmb)
+  interconnect.addConnection(dma.read,    dBus32.bmb)
+  interconnect.addConnection(dma.readSg,  dBus32.bmb)
+  interconnect.addConnection(dma.writeSg, dBus32.bmb)
+
+  val vga = BmbVgaCtrlGenerator(0x90000)
+  bsbInterconnect.connect(dma.vga.stream.output, vga.input)
+
   //Interconnect specification
   interconnect.setDefaultArbitration(BmbInterconnectGenerator.STATIC_PRIORITY)
   interconnect.setPriority(cpu.iBus, 1)
   interconnect.setPriority(cpu.dBus, 2)
   interconnect.addConnection(
-    cpu.iBus -> List(sdramA0.bmb,ramA.ctrl),
-    cpu.dBus -> List(sdramA0.bmb,ramA.ctrl, bmbPeripheral.bmb)
+    cpu.iBus   -> List(dBus32.bmb),//sdramA0.bmb,ramA.ctrl, bmbPeripheral.bmb),
+    //fabric.dBus.bmb   -> List(sdramA0.bmb,ramA.ctrl, bmbPeripheral.bmb)
+    cpu.dBus   -> List(dBus32.bmb),
+    dBus32.bmb -> List(sdramA0.bmb,ramA.ctrl, bmbPeripheral.bmb)
   )
 }
 
@@ -80,8 +111,27 @@ class ICESugarProMinimal extends Component{
     omitReset = true
   )
 
+  val vgaCdCtrl = ClockDomainResetGenerator()
+  vgaCdCtrl.holdDuration.load(63)
+  vgaCdCtrl.asyncReset(debugCdCtrl)
+  vgaCdCtrl.setInput(
+    debugCdCtrl.outputClockDomain,
+    omitReset = true
+  )
+
+
+  val hdmiCd = ClockDomainResetGenerator()
+  hdmiCd.holdDuration.load(63)
+  hdmiCd.asyncReset(debugCdCtrl)
+  hdmiCd.setInput(
+    debugCdCtrl.outputClockDomain,
+    omitReset = true
+  )
+
+
   val debugCd  = debugCdCtrl.outputClockDomain
   val systemCd = systemCdCtrl.outputClockDomain
+
 
   val clocking = new Area{
     val resetn    = in Bool()
@@ -120,11 +170,17 @@ class ICESugarProMinimal extends Component{
     cpu.enableJtag(debugCdCtrl, systemCdCtrl)
 
     val phyA = Ecp5Sdrx2PhyGenerator().connect(sdramA)
+    val hdmiPhy = vga.withHdmiEcp5(hdmiCd.outputClockDomain)
 
     interconnect.setPipelining(bmbPeripheral.bmb)(cmdHalfRate = true, rspHalfRate = true)
     interconnect.setPipelining(cpu.dBus)(cmdValid = true)
+    interconnect.setPipelining(dBus32.bmb)(cmdValid = true, cmdReady = true, rspValid = true)
     interconnect.setPipelining(sdramA0.bmb)(cmdValid = true, cmdReady = true, rspValid = true)
+    interconnect.setPipelining(dma.read)(cmdHalfRate = true, rspValid = true)
+    interconnect.setPipelining(dma.readSg)(rspValid = true)
   }
+
+  system.vga.vgaCd.load(vgaCdCtrl.outputClockDomain)
 }
 
 object ICESugarProMinimalAbstract{
@@ -260,6 +316,24 @@ object ICESugarProMinimalAbstract{
     )
 
     gpioA.parameter load Gpio.Parameter(width = 8)
+
+    vga.parameter load BmbVgaCtrlParameter(
+      rgbConfig = RgbConfig(5,6,5)
+    )
+
+    dma.parameter.layout load DmaMemoryLayout(
+      bankCount     = 1,
+      bankWords     = 128,
+      bankWidth     = 32,
+      priorityWidth = 2
+    )
+
+    dma.setBmbParameter(
+      addressWidth = 32,
+      dataWidth = 32,
+      lengthWidth = 6
+    )
+
 
     // val io = new Bundle {
     //   val externalInterruptLine = in Bool()
