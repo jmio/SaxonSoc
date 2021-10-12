@@ -112,23 +112,9 @@ class ICESugarProMinimal extends Component{
     omitReset = true
   )
 
-  val vgaCdCtrl = ClockDomainResetGenerator()
-  vgaCdCtrl.holdDuration.load(63)
-  vgaCdCtrl.asyncReset(debugCdCtrl)
-  vgaCdCtrl.setInput(
-    debugCdCtrl.outputClockDomain,
-    omitReset = true
-  )
-
-
   val hdmiCd = ClockDomainResetGenerator()
   hdmiCd.holdDuration.load(63)
   hdmiCd.asyncReset(debugCdCtrl)
-  hdmiCd.setInput(
-    debugCdCtrl.outputClockDomain,
-    omitReset = true
-  )
-
 
   val debugCd  = debugCdCtrl.outputClockDomain
   val systemCd = systemCdCtrl.outputClockDomain
@@ -144,6 +130,7 @@ class ICESugarProMinimal extends Component{
       val clkin = in Bool()
       val clkout_sdram = out Bool()
       val clkout_system = out Bool()
+      val clkout_hdmi   = out Bool()
       val locked = out Bool()
     }
     pll.clkin := clk25m
@@ -160,6 +147,10 @@ class ICESugarProMinimal extends Component{
         )
       )
     )
+
+    Clock.syncDrive(pll.clkin, pll.clkout_hdmi)
+    Clock.syncDrive(pll.clkin, pll.clkout_system)    
+    hdmiCd.setInput(ClockDomain(pll.clkout_hdmi))
 
     val bb = ClockDomain(DCCA.on(pll.clkout_sdram), False)(ODDRX1F())
     bb.D0 <> True
@@ -180,7 +171,7 @@ class ICESugarProMinimal extends Component{
     interconnect.setPipelining(dma.read)(cmdHalfRate = true, rspValid = true)
   }
 
-  system.vga.vgaCd.load(vgaCdCtrl.outputClockDomain)
+  system.vga.vgaCd.load(systemCd)
 }
 
 object ICESugarProMinimalAbstract{
