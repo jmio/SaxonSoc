@@ -43,7 +43,6 @@ class ICESugarProMinimalAbstract extends Area{
   cpu.setTimerInterrupt(clint.timerInterrupt(0))
   cpu.setSoftwareInterrupt(clint.softwareInterrupt(0))
   plic.addTarget(cpu.externalInterrupt)
-  plic.addTarget(cpu.externalSupervisorInterrupt)
   List(clint.logic, cpu.logic).produce{
     for (plugin <- cpu.config.plugins) plugin match {
       case plugin : CsrPlugin if plugin.utime != null => plugin.utime := RegNext(clint.logic.io.time)
@@ -78,8 +77,10 @@ class ICESugarProMinimalAbstract extends Area{
 
   //interconnect.addConnection(dma.write,   dBus32.bmb)
   interconnect.addConnection(dma.read,    dBus32.bmb)
-  interconnect.addConnection(dma.readSg,  dBus32.bmb)
-  interconnect.addConnection(dma.writeSg, dBus32.bmb)
+
+  // Sg is Scatter Gather DMA I/F
+  //interconnect.addConnection(dma.readSg,  dBus32.bmb)
+  //interconnect.addConnection(dma.writeSg, dBus32.bmb)
 
   val vga = BmbVgaCtrlGenerator(0x90000)
   bsbInterconnect.connect(dma.vga.stream.output, vga.input)
@@ -177,7 +178,6 @@ class ICESugarProMinimal extends Component{
     interconnect.setPipelining(dBus32.bmb)(cmdValid = true, cmdReady = true, rspValid = true)
     interconnect.setPipelining(sdramA0.bmb)(cmdValid = true, cmdReady = true, rspValid = true)
     interconnect.setPipelining(dma.read)(cmdHalfRate = true, rspValid = true)
-    interconnect.setPipelining(dma.readSg)(rspValid = true)
   }
 
   system.vga.vgaCd.load(vgaCdCtrl.outputClockDomain)
