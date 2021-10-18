@@ -168,6 +168,7 @@ class ICESugarProMinimal extends Component{
 
     val phyA = Ecp5Sdrx2PhyGenerator().connect(sdramA)
     val hdmiPhy = vga.withHdmiEcp5(hdmiCd.outputClockDomain)
+    val vgaPhy = vga.withRegisterPhy(withColorEn = false)
 
     interconnect.setPipelining(bmbPeripheral.bmb)(cmdHalfRate = true, rspHalfRate = true)
     interconnect.setPipelining(cpu.dBus)(cmdValid = true)
