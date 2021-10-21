@@ -127,6 +127,7 @@ class ICESugarProMinimal extends Component{
     val resetn    = in Bool()
     val clk25m    = in Bool()
     val sdram_clk = out Bool()
+    val vga_clk   = out Bool()
 
     val pll = new BlackBox{
       setDefinitionName("pll_50mhz")
@@ -161,6 +162,8 @@ class ICESugarProMinimal extends Component{
     bb.D0 <> True
     bb.D1 <> False
     bb.Q <> sdram_clk
+
+    pll.clkout_vga <> vga_clk;
   }
 
   val system = systemCd on new ICESugarProMinimalAbstract(){
